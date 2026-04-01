@@ -32,12 +32,12 @@ const float LEFT_FACTOR  = 1.00;
 const float RIGHT_FACTOR = 0.95;
 
 // --- RAMP ACCELERATION ---
-const int RAMP_RATE = 9;  // PWM/step - tốc độ tăng tốc
+const int RAMP_RATE = 16;  // Tăng từ 9 → 16 (tăng tốc nhanh hơn)
 
 // --- PID PARAMETERS (tune ở đây) ---
-const float Kp = 8.5;    // Giảm từ 13.0 → 8.5 (tránh dao động)
-const float Ki = 0.12;   // Tăng từ 0.06 → 0.12 (hold vị trí tốt hơn)
-const float Kd = 2.2;    // Tăng từ 1.8 → 2.2 (smooth hơn)
+const float Kp = 12.5;   // Tăng từ 8.5 → 12.5 (phản ứng nhanh tức thì)
+const float Ki = 0.14;   // Tăng từ 0.12 → 0.14 (tích lũy error nhanh)
+const float Kd = 2.5;    // Tăng từ 2.2 → 2.5 (smooth hơn)
 
 // --- NGƯỠNG ---
 const unsigned long SENSOR_TIMEOUT = 600;  // ms
