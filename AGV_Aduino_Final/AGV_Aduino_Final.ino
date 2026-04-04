@@ -16,6 +16,8 @@ const int L_LPWM = 6;
 const int L_RPWM = 5;
 
 // --- MOTOR PHẢI (IBT-2) ---
+
+
 const int R_LPWM = 2;
 const int R_RPWM = 3;
 
@@ -32,12 +34,12 @@ const float LEFT_FACTOR  = 1.00;
 const float RIGHT_FACTOR = 0.95;
 
 // --- RAMP ACCELERATION ---
-const int RAMP_RATE = 255;  // Tắt ramp - phản ứng tức thì
+const int RAMP_RATE = 30;  // Tăng mềm - giảm giật
 
 // --- PID PARAMETERS ---
-const float Kp = 120.0;
-const float Ki = 0.50;
-const float Kd = 6.0;
+const float Kp = 70.0;
+const float Ki = 0.30;
+const float Kd = 4.0;
 
 // --- NGƯỠNG ---
 const unsigned long SENSOR_TIMEOUT = 200;
