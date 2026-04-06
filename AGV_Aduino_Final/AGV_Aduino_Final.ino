@@ -2,9 +2,9 @@
 //  AGV MAGNETIC LINE FOLLOWER - 4 MOTOR (PID FIXED)
 //  Driver: IBT-2 (BTS7960) x2
 //  Arduino Mega 2560
-//  CẢI TIẾN: 
-//    - Dừng ngay khi BẤT KỲ cảm biến nào phát hiện trạm
-//    - Bỏ qua tín hiệu trạm 1.5s khi mới xuất phát
+//  CẢI TIẾN:
+//    #3 - Thoát trạm thông minh (chờ mất hẳn tín hiệu)
+//    #6 - LED xanh/đỏ + Buzzer active báo trạng thái
 // ============================================
 
 // --- CẢM BIẾN TRƯỚC ---
@@ -25,9 +25,14 @@ const int R_RPWM = 3;
 const int BTN_FORWARD  = 10;
 const int BTN_BACKWARD = 11;
 
+// --- LED & BUZZER (#6) ---
+const int LED_GREEN = 44;
+const int LED_RED   = 46;
+const int BUZZER    = 48;
+
 // --- THÔNG SỐ CHÍNH ---
-const int BASE_SPEED  = 210;
-const int MIN_SPEED   = 0;
+const int BASE_SPEED = 210;
+const int MIN_SPEED  = 0;
 
 // --- CALIBRATION ---
 const float LEFT_FACTOR  = 1.00;
@@ -46,9 +51,8 @@ const unsigned long SENSOR_TIMEOUT    = 200;
 const int           MIN_SENSORS       = 2;
 const int           STATION_THRESHOLD = 5;
 
-// --- THOÁT TRẠM ---
-unsigned long stationIgnoreUntil = 0;
-const unsigned long STATION_IGNORE_MS = 1500; // Bỏ qua trạm 1.5s khi mới xuất phát
+// --- THOÁT TRẠM THÔNG MINH (#3) ---
+bool exitingStation = false;
 
 // --- TRẠNG THÁI ---
 enum State { STOP, FORWARD, BACKWARD, AT_STATION };
@@ -92,7 +96,13 @@ void setup() {
   pinMode(BTN_FORWARD,  INPUT_PULLUP);
   pinMode(BTN_BACKWARD, INPUT_PULLUP);
 
+  pinMode(LED_GREEN, OUTPUT);
+  pinMode(LED_RED,   OUTPUT);
+  pinMode(BUZZER,    OUTPUT);
+
   stopMotors();
+  setLED_Stop();
+
   Serial.begin(9600);
   delay(800);
   Serial.println("=== AGV PID - READY ===");
@@ -114,6 +124,28 @@ void loop() {
 }
 
 // ============================================
+// (#6) LED & BUZZER
+// ============================================
+void setLED_Run() {
+  digitalWrite(LED_GREEN, HIGH);
+  digitalWrite(LED_RED,   LOW);
+}
+
+void setLED_Stop() {
+  digitalWrite(LED_GREEN, LOW);
+  digitalWrite(LED_RED,   HIGH);
+}
+
+void beepBuzzer(int times) {
+  for(int i = 0; i < times; i++) {
+    digitalWrite(BUZZER, HIGH);
+    delay(150);
+    digitalWrite(BUZZER, LOW);
+    if(i < times - 1) delay(100);
+  }
+}
+
+// ============================================
 // ĐỌC NÚT BẤM
 // ============================================
 void readButtons() {
@@ -128,25 +160,29 @@ void readButtons() {
   if(pressedF) {
     if(currentState == FORWARD) {
       currentState = STOP;
+      setLED_Stop();
       Serial.println(">> DUNG");
     } else {
-      currentState = FORWARD;
+      currentState   = FORWARD;
+      exitingStation = true;
       integral_F = 0; integral_R = 0;
       prev_error_F = 0; prev_error_R = 0;
-      stationIgnoreUntil = millis() + STATION_IGNORE_MS; // ✅ Bỏ qua trạm khi mới xuất phát
-      Serial.println(">> TIEN (bo qua tram trong 1.5s)");
+      setLED_Run();
+      Serial.println(">> TIEN");
     }
   }
   else if(pressedB) {
     if(currentState == BACKWARD) {
       currentState = STOP;
+      setLED_Stop();
       Serial.println(">> DUNG");
     } else {
-      currentState = BACKWARD;
+      currentState   = BACKWARD;
+      exitingStation = true;
       integral_F = 0; integral_R = 0;
       prev_error_F = 0; prev_error_R = 0;
-      stationIgnoreUntil = millis() + STATION_IGNORE_MS; // ✅ Bỏ qua trạm khi mới xuất phát
-      Serial.println(">> LUI (bo qua tram trong 1.5s)");
+      setLED_Run();
+      Serial.println(">> LUI");
     }
   }
 
@@ -171,8 +207,7 @@ void readSensors() {
 
 // ============================================
 // PHÁT HIỆN TRẠM
-// ✅ Dừng ngay khi BẤT KỲ cảm biến nào thấy trạm
-// ✅ Bỏ qua trong STATION_IGNORE_MS khi mới xuất phát
+// #3 - Thoát thông minh: chờ mất hẳn tín hiệu trạm
 // ============================================
 void detectStation() {
   int countF = 0, countR = 0;
@@ -180,16 +215,28 @@ void detectStation() {
     if(valF[i] == 0) countF++;
     if(valR[i] == 0) countR++;
   }
-  stationFront = (countF >= STATION_THRESHOLD);
-  stationRear  = (countR >= STATION_THRESHOLD);
 
-  // ✅ Đang trong thời gian thoát trạm → bỏ qua
-  if(millis() < stationIgnoreUntil) return;
+  bool rawStationF = (countF >= STATION_THRESHOLD);
+  bool rawStationR = (countR >= STATION_THRESHOLD);
+
+  // (#3) Đang thoát trạm → chờ mất hẳn tín hiệu mới tiếp tục theo dõi
+  if(exitingStation) {
+    if(!rawStationF && !rawStationR) {
+      exitingStation = false;
+      Serial.println("... Da roi khoi tram, san sang phat hien tram moi ...");
+    }
+    return;
+  }
+
+  stationFront = rawStationF;
+  stationRear  = rawStationR;
 
   if((currentState == FORWARD || currentState == BACKWARD) &&
      (stationFront || stationRear)) {
     stopMotors();
     currentState = AT_STATION;
+    setLED_Stop();
+    beepBuzzer(2);
 
     if(stationFront && stationRear)
       Serial.println(">>> CA HAI CAM BIEN PHAT HIEN TRAM - DUNG <<<");
@@ -257,6 +304,7 @@ void runMotors() {
     if(millis() - lastLineSeen_R > SENSOR_TIMEOUT) {
       stopMotors();
       currentState = STOP;
+      setLED_Stop();
       Serial.println(">> MAT LINE SAU - TIMEOUT");
       return;
     }
@@ -270,6 +318,7 @@ void runMotors() {
     if(millis() - lastLineSeen_F > SENSOR_TIMEOUT) {
       stopMotors();
       currentState = STOP;
+      setLED_Stop();
       Serial.println(">> MAT LINE TRUOC - TIMEOUT");
       return;
     }
@@ -320,7 +369,7 @@ void driveBackward(int pos) {
   float derivative = error - prev_error_R;
   float correction  = Kp * error + Ki * integral_R + Kd * derivative;
 
-  correction = -correction; // Đảo dấu cho chiều lùi
+  correction = -correction;
 
   prev_error_R = error;
   integral_R   = constrain(integral_R, -60, 60);
@@ -377,25 +426,13 @@ void debugPrint() {
   if(millis() - last < 100) return;
   last = millis();
 
-  // Hiện thị thời gian còn lại đang bỏ qua trạm
-  bool ignoring = (millis() < stationIgnoreUntil);
-
   if(currentState == FORWARD) {
     Serial.print(">>> TIEN <<<");
-    if(ignoring) {
-      Serial.print(" [BO QUA TRAM: ");
-      Serial.print((stationIgnoreUntil - millis()) / 1000.0, 1);
-      Serial.print("s]");
-    }
-    Serial.print(" | POS:");
-    Serial.print(posRear);
-    Serial.print(" CORR:");
-    Serial.print(Kp * posRear, 1);
-    Serial.print(" | L:");
-    Serial.print(currentSpeed_L);
-    Serial.print(" R:");
-    Serial.print(currentSpeed_R);
-    Serial.print(" | SENSOR R: [");
+    if(exitingStation) Serial.print(" [ROI TRAM]");
+    Serial.print(" | POS:"); Serial.print(posRear);
+    Serial.print(" | L:");   Serial.print(currentSpeed_L);
+    Serial.print(" R:");     Serial.print(currentSpeed_R);
+    Serial.print(" | R: [");
     for(int i = 0; i < 8; i++) {
       if(i == 0 || i == 7) Serial.print("*");
       else Serial.print(valR[i]);
@@ -405,20 +442,11 @@ void debugPrint() {
   }
   else if(currentState == BACKWARD) {
     Serial.print(">>> LUI <<<");
-    if(ignoring) {
-      Serial.print(" [BO QUA TRAM: ");
-      Serial.print((stationIgnoreUntil - millis()) / 1000.0, 1);
-      Serial.print("s]");
-    }
-    Serial.print(" | POS:");
-    Serial.print(posFront);
-    Serial.print(" CORR:");
-    Serial.print(Kp * posFront, 1);
-    Serial.print(" | L:");
-    Serial.print(currentSpeed_L);
-    Serial.print(" R:");
-    Serial.print(currentSpeed_R);
-    Serial.print(" | SENSOR F: [");
+    if(exitingStation) Serial.print(" [ROI TRAM]");
+    Serial.print(" | POS:"); Serial.print(posFront);
+    Serial.print(" | L:");   Serial.print(currentSpeed_L);
+    Serial.print(" R:");     Serial.print(currentSpeed_R);
+    Serial.print(" | F: [");
     for(int i = 0; i < 8; i++) {
       if(i == 0 || i == 7) Serial.print("*");
       else Serial.print(valF[i]);
@@ -443,7 +471,7 @@ void debugPrint() {
     Serial.println("]");
   }
   else {
-    Serial.print(">>> DUNG - SENSOR TEST <<<");
+    Serial.print(">>> DUNG <<<");
     Serial.print(" | F: [");
     for(int i = 0; i < 8; i++) {
       if(i == 0 || i == 7) Serial.print("*");
