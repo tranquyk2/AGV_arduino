@@ -1,78 +1,63 @@
-// ============================================
-//  AGV MAGNETIC LINE FOLLOWER - 4 MOTOR (PID FIXED)
-//  Driver: IBT-2 (BTS7960) x2
-//  Arduino Mega 2560
-//  CẢI TIẾN:
-//    #3 - Thoát trạm thông minh (chờ mất hẳn tín hiệu)
-//    #6 - LED xanh/đỏ + Buzzer active báo trạng thái
-// ============================================
 
-// --- CẢM BIẾN TRƯỚC ---
+#include <avr/wdt.h>
+
+// --- CẢM BIẾN ---
 const int SF[8] = {36,34,32,30,28,26,24,22};
-
-// --- CẢM BIẾN SAU ---
 const int SR[8] = {51,49,47,45,43,41,39,37};
 
-// --- MOTOR TRÁI (IBT-2) ---
+// --- MOTOR ---
 const int L_LPWM = 6;
 const int L_RPWM = 5;
-
-// --- MOTOR PHẢI (IBT-2) ---
 const int R_LPWM = 2;
 const int R_RPWM = 3;
 
-// --- NÚT BẤM ---
+// --- NÚT ---
 const int BTN_FORWARD  = 10;
 const int BTN_BACKWARD = 11;
 
-// --- LED & BUZZER (#6) ---
+// --- LED & BUZZER ---
 const int LED_GREEN = 44;
 const int LED_RED   = 46;
-const int BUZZER    = 48;
+const int BUZZER    = 8;
 
-// --- THÔNG SỐ CHÍNH ---
+// --- THÔNG SỐ ---
 const int BASE_SPEED = 210;
 const int MIN_SPEED  = 0;
+const int RAMP_RATE  = 30;
 
 // --- CALIBRATION ---
 const float LEFT_FACTOR  = 1.00;
 const float RIGHT_FACTOR = 0.95;
 
-// --- RAMP ACCELERATION ---
-const int RAMP_RATE = 30;
-
-// --- PID PARAMETERS ---
+// --- PID ---
 const float Kp = 70.0;
-const float Ki = 0.30;
+const float Ki = 0.25;   // Giảm nhẹ so với 0.30 để ổn định hơn
 const float Kd = 4.0;
 
 // --- NGƯỠNG ---
-const unsigned long SENSOR_TIMEOUT    = 200;
-const int           MIN_SENSORS       = 2;
-const int           STATION_THRESHOLD = 5;
+const unsigned long SENSOR_TIMEOUT = 280;
+const int MIN_SENSORS       = 2;
+const int STATION_THRESHOLD = 5;
 
-// --- THOÁT TRẠM THÔNG MINH (#3) ---
-bool exitingStation = false;
-
-// --- TRẠNG THÁI ---
+// --- STATE ---
 enum State { STOP, FORWARD, BACKWARD, AT_STATION };
 State currentState = STOP;
 
 // --- BIẾN ---
-int  valF[8], valR[8];
-int  filteredF[8], filteredR[8];
-int  posFront = 0, posRear = 0;
-bool onLineFront = false, onLineRear = false;
-bool stationFront = false, stationRear = false;
+int valF[8], valR[8];
+int filteredF[8], filteredR[8];
 
-unsigned long lastBtnTime = 0;
-const int DEBOUNCE_MS = 80;
-bool lastBtnF = HIGH;
-bool lastBtnB = HIGH;
+int posFront = 0, posRear = 0;
+bool onLineFront = false, onLineRear = false;
 
 unsigned long lastLineSeen_F = 0, lastLineSeen_R = 0;
 
-// Ramp
+// Button
+unsigned long lastBtnTime = 0;
+const int DEBOUNCE_MS = 80;
+bool lastBtnF = HIGH, lastBtnB = HIGH;
+
+// Speed
 int currentSpeed_L = 0, currentSpeed_R = 0;
 int targetSpeed_L  = 0, targetSpeed_R  = 0;
 
@@ -80,22 +65,27 @@ int targetSpeed_L  = 0, targetSpeed_R  = 0;
 float prev_error_F = 0, prev_error_R = 0;
 float integral_F   = 0, integral_R   = 0;
 
-// Moving average filter
-int posF_history[3] = {0, 0, 0};
-int posR_history[3] = {0, 0, 0};
-int pos_idx = 0;
+// Moving Average Filter
+int posF_history[3] = {0,0,0};
+int posR_history[3] = {0,0,0};
+int pos_idx_F = 0;
+int pos_idx_R = 0;
 
-// ============================================
+// Station
+bool exitingStation = false;
+
 void setup() {
-  for(int i = 0; i < 8; i++) {
+  for(int i=0; i<8; i++) {
     pinMode(SF[i], INPUT);
     pinMode(SR[i], INPUT);
   }
+
   pinMode(L_LPWM, OUTPUT); pinMode(L_RPWM, OUTPUT);
   pinMode(R_LPWM, OUTPUT); pinMode(R_RPWM, OUTPUT);
+  
   pinMode(BTN_FORWARD,  INPUT_PULLUP);
   pinMode(BTN_BACKWARD, INPUT_PULLUP);
-
+  
   pinMode(LED_GREEN, OUTPUT);
   pinMode(LED_RED,   OUTPUT);
   pinMode(BUZZER,    OUTPUT);
@@ -103,16 +93,22 @@ void setup() {
   stopMotors();
   setLED_Stop();
 
-  Serial.begin(9600);
+  Serial.begin(115200);
   delay(800);
-  Serial.println("=== AGV PID - READY ===");
+  Serial.println("=== AGV MERGED OPTIMIZED - READY ===");
 
   lastLineSeen_F = millis();
   lastLineSeen_R = millis();
+
+  buzzer_beep(3);
+  delay(1000);
+  
+  wdt_enable(WDTO_4S);
 }
 
 // ============================================
 void loop() {
+  wdt_reset();
   readButtons();
   readSensors();
   detectStation();
@@ -124,8 +120,7 @@ void loop() {
 }
 
 // ============================================
-// (#6) LED & BUZZER
-// ============================================
+// LED & BUZZER
 void setLED_Run() {
   digitalWrite(LED_GREEN, HIGH);
   digitalWrite(LED_RED,   LOW);
@@ -136,7 +131,7 @@ void setLED_Stop() {
   digitalWrite(LED_RED,   HIGH);
 }
 
-void beepBuzzer(int times) {
+void buzzer_beep(int times) {
   for(int i = 0; i < times; i++) {
     digitalWrite(BUZZER, HIGH);
     delay(150);
@@ -146,8 +141,7 @@ void beepBuzzer(int times) {
 }
 
 // ============================================
-// ĐỌC NÚT BẤM
-// ============================================
+// BUTTON
 void readButtons() {
   if(millis() - lastBtnTime < DEBOUNCE_MS) return;
 
@@ -158,12 +152,13 @@ void readButtons() {
   bool pressedB = (lastBtnB == HIGH && curB == LOW);
 
   if(pressedF) {
+    buzzer_beep(1);
     if(currentState == FORWARD) {
       currentState = STOP;
       setLED_Stop();
       Serial.println(">> DUNG");
     } else {
-      currentState   = FORWARD;
+      currentState = FORWARD;
       exitingStation = true;
       integral_F = 0; integral_R = 0;
       prev_error_F = 0; prev_error_R = 0;
@@ -172,12 +167,13 @@ void readButtons() {
     }
   }
   else if(pressedB) {
+    buzzer_beep(1);
     if(currentState == BACKWARD) {
       currentState = STOP;
       setLED_Stop();
       Serial.println(">> DUNG");
     } else {
-      currentState   = BACKWARD;
+      currentState = BACKWARD;
       exitingStation = true;
       integral_F = 0; integral_R = 0;
       prev_error_F = 0; prev_error_R = 0;
@@ -192,64 +188,58 @@ void readButtons() {
 }
 
 // ============================================
-// ĐỌC & XỬ LÝ CẢM BIẾN
-// ============================================
+// SENSOR
 void readSensors() {
+  static int prevF[8] = {0}, prevR[8] = {0};
+
   for(int i = 0; i < 8; i++) {
     valF[i] = digitalRead(SF[i]);
     valR[i] = digitalRead(SR[i]);
-  }
-  for(int i = 0; i < 8; i++) {
-    filteredF[i] = valF[i];
-    filteredR[i] = valR[i];
+
+    filteredF[i] = (valF[i] + prevF[i] == 2) ? 1 : 0;
+    filteredR[i] = (valR[i] + prevR[i] == 2) ? 1 : 0;
+
+    prevF[i] = valF[i];
+    prevR[i] = valR[i];
   }
 }
 
 // ============================================
-// PHÁT HIỆN TRẠM
-// #3 - Thoát thông minh: chờ mất hẳn tín hiệu trạm
-// ============================================
+// STATION DETECTION (Improved)
 void detectStation() {
   int countF = 0, countR = 0;
   for(int i = 1; i < 7; i++) {
-    if(valF[i] == 0) countF++;
-    if(valR[i] == 0) countR++;
+    if(filteredF[i] == 0) countF++;
+    if(filteredR[i] == 0) countR++;
   }
 
-  bool rawStationF = (countF >= STATION_THRESHOLD);
-  bool rawStationR = (countR >= STATION_THRESHOLD);
+  bool atStation = (countF >= STATION_THRESHOLD) || (countR >= STATION_THRESHOLD);
 
-  // (#3) Đang thoát trạm → chờ mất hẳn tín hiệu mới tiếp tục theo dõi
   if(exitingStation) {
-    if(!rawStationF && !rawStationR) {
+    if(!atStation) {
       exitingStation = false;
-      Serial.println("... Da roi khoi tram, san sang phat hien tram moi ...");
+      Serial.println("... Da thoat tram thanh cong ...");
     }
     return;
   }
 
-  stationFront = rawStationF;
-  stationRear  = rawStationR;
-
-  if((currentState == FORWARD || currentState == BACKWARD) &&
-     (stationFront || stationRear)) {
+  if((currentState == FORWARD || currentState == BACKWARD) && atStation) {
     stopMotors();
     currentState = AT_STATION;
     setLED_Stop();
-    beepBuzzer(2);
-
-    if(stationFront && stationRear)
-      Serial.println(">>> CA HAI CAM BIEN PHAT HIEN TRAM - DUNG <<<");
-    else if(stationFront)
-      Serial.println(">>> CAM BIEN TRUOC PHAT HIEN TRAM - DUNG <<<");
-    else
-      Serial.println(">>> CAM BIEN SAU PHAT HIEN TRAM - DUNG <<<");
+    buzzer_beep(2);
+    Serial.println(">>> DEN TRAM - DUNG <<<");
   }
 }
 
 // ============================================
-// TÍNH VỊ TRÍ
-// ============================================
+// POSITION CALCULATION
+int applyMovingAverage(int newVal, int* history, int &idx) {
+  history[idx] = newVal;
+  idx = (idx + 1) % 3;
+  return (history[0] + history[1] + history[2]) / 3;
+}
+
 void calcPositionFront() {
   int sum = 0, count = 0;
   for(int i = 1; i < 7; i++) {
@@ -262,8 +252,7 @@ void calcPositionFront() {
     onLineFront = false;
     return;
   }
-  posFront = sum / count;
-  posFront = applyMovingAverage(posFront, posF_history);
+  posFront = applyMovingAverage(sum / count, posF_history, pos_idx_F);
   onLineFront = true;
   lastLineSeen_F = millis();
 }
@@ -280,210 +269,179 @@ void calcPositionRear() {
     onLineRear = false;
     return;
   }
-  posRear = sum / count;
-  posRear = applyMovingAverage(posRear, posR_history);
+  posRear = applyMovingAverage(sum / count, posR_history, pos_idx_R);
   onLineRear = true;
   lastLineSeen_R = millis();
 }
 
-int applyMovingAverage(int newVal, int* history) {
-  history[pos_idx] = newVal;
-  pos_idx = (pos_idx + 1) % 3;
-  return (history[0] + history[1] + history[2]) / 3;
-}
-
 // ============================================
-// CHẠY MOTOR
-// ============================================
+// MOTOR CONTROL
 void runMotors() {
-  if(currentState == FORWARD) {
-    if(!onLineRear) {
-      if(millis() - lastLineSeen_R > 150) stopMotors();
-      return;
-    }
-    if(millis() - lastLineSeen_R > SENSOR_TIMEOUT) {
-      stopMotors();
-      currentState = STOP;
-      setLED_Stop();
-      Serial.println(">> MAT LINE SAU - TIMEOUT");
-      return;
-    }
-    driveForward(posRear);
+  if(currentState == STOP || currentState == AT_STATION) {
+    stopMotors();
+    return;
   }
-  else if(currentState == BACKWARD) {
-    if(!onLineFront) {
-      if(millis() - lastLineSeen_F > 150) stopMotors();
-      return;
-    }
-    if(millis() - lastLineSeen_F > SENSOR_TIMEOUT) {
+
+  // FAILSAFE MẤT LINE TOÀN BỘ
+  if(!onLineFront && !onLineRear) {
+    stopMotors();
+    currentState = STOP;
+    setLED_Stop();
+    Serial.println(">> MAT LINE HOAN TOAN");
+    return;
+  }
+
+  // Failsafe
+  if((currentState == FORWARD && !onLineRear) || 
+     (currentState == BACKWARD && !onLineFront)) {
+    if(millis() - (currentState == FORWARD ? lastLineSeen_R : lastLineSeen_F) > SENSOR_TIMEOUT) {
       stopMotors();
       currentState = STOP;
       setLED_Stop();
-      Serial.println(">> MAT LINE TRUOC - TIMEOUT");
-      return;
+      Serial.println(">> MAT LINE - TIMEOUT - STOP");
     }
+    return;
+  }
+
+  if(currentState == FORWARD) {
+    driveForward(posRear);
+  } else if(currentState == BACKWARD) {
     driveBackward(posFront);
   }
 }
 
-// ============================================
-// DRIVE FORWARD
-// ============================================
 void driveForward(int pos) {
   float error = pos;
-
   integral_F += error;
   float derivative = error - prev_error_F;
-  float correction  = Kp * error + Ki * integral_F + Kd * derivative;
+  float correction = Kp * error + Ki * integral_F + Kd * derivative;
 
+  correction = constrain(correction, -160, 160);
   prev_error_F = error;
-  integral_F   = constrain(integral_F, -60, 60);
+  integral_F = constrain(integral_F, -60, 60);
 
   int leftSpeed  = BASE_SPEED + correction;
   int rightSpeed = BASE_SPEED - correction;
 
-  leftSpeed  = constrain(leftSpeed,  MIN_SPEED, 255);
-  rightSpeed = constrain(rightSpeed, MIN_SPEED, 255);
+  targetSpeed_L = constrain(leftSpeed,  MIN_SPEED, 255);
+  targetSpeed_R = constrain(rightSpeed, MIN_SPEED, 255);
 
-  targetSpeed_L = leftSpeed;
-  targetSpeed_R = rightSpeed;
-  applyRampAcceleration();
-
-  float L_factor = (error != 0) ? LEFT_FACTOR : 1.0;
-  float R_factor = (error != 0) ? RIGHT_FACTOR : 1.0;
-
-  int L_out = constrain((int)(currentSpeed_L * L_factor), 0, 255);
-  int R_out = constrain((int)(currentSpeed_R * R_factor), 0, 255);
-
-  analogWrite(L_LPWM, L_out);  analogWrite(L_RPWM, 0);
-  analogWrite(R_LPWM, R_out);  analogWrite(R_RPWM, 0);
+  applyRamp();
+  applyMotorOutput(true);
 }
 
-// ============================================
-// DRIVE BACKWARD
-// ============================================
 void driveBackward(int pos) {
   float error = pos;
-
   integral_R += error;
   float derivative = error - prev_error_R;
-  float correction  = Kp * error + Ki * integral_R + Kd * derivative;
+  float correction = Kp * error + Ki * integral_R + Kd * derivative;
 
   correction = -correction;
-
+  correction = constrain(correction, -160, 160);
   prev_error_R = error;
-  integral_R   = constrain(integral_R, -60, 60);
+  integral_R = constrain(integral_R, -60, 60);
 
   int leftSpeed  = BASE_SPEED + correction;
   int rightSpeed = BASE_SPEED - correction;
 
-  leftSpeed  = constrain(leftSpeed,  MIN_SPEED, 255);
-  rightSpeed = constrain(rightSpeed, MIN_SPEED, 255);
+  targetSpeed_L = constrain(leftSpeed,  MIN_SPEED, 255);
+  targetSpeed_R = constrain(rightSpeed, MIN_SPEED, 255);
 
-  targetSpeed_L = leftSpeed;
-  targetSpeed_R = rightSpeed;
-  applyRampAcceleration();
+  applyRamp();
+  applyMotorOutput(false);
+}
 
-  float L_factor = (error != 0) ? LEFT_FACTOR : 1.0;
-  float R_factor = (error != 0) ? RIGHT_FACTOR : 1.0;
+void applyRamp() {
+  currentSpeed_L = (currentSpeed_L < targetSpeed_L) ? 
+                   min(currentSpeed_L + RAMP_RATE, targetSpeed_L) :
+                   max(currentSpeed_L - RAMP_RATE, targetSpeed_L);
+
+  currentSpeed_R = (currentSpeed_R < targetSpeed_R) ? 
+                   min(currentSpeed_R + RAMP_RATE, targetSpeed_R) :
+                   max(currentSpeed_R - RAMP_RATE, targetSpeed_R);
+}
+
+void applyMotorOutput(bool forward) {
+  float L_factor = LEFT_FACTOR;
+  float R_factor = RIGHT_FACTOR;
 
   int L_out = constrain((int)(currentSpeed_L * L_factor), 0, 255);
   int R_out = constrain((int)(currentSpeed_R * R_factor), 0, 255);
 
-  analogWrite(L_LPWM, 0);      analogWrite(L_RPWM, L_out);
-  analogWrite(R_LPWM, 0);      analogWrite(R_RPWM, R_out);
+  if(forward) {
+    analogWrite(L_LPWM, L_out); analogWrite(L_RPWM, 0);
+    analogWrite(R_LPWM, R_out); analogWrite(R_RPWM, 0);
+  } else {
+    analogWrite(L_LPWM, 0);     analogWrite(L_RPWM, L_out);
+    analogWrite(R_LPWM, 0);     analogWrite(R_RPWM, R_out);
+  }
 }
 
-// ============================================
-// RAMP & STOP
-// ============================================
-void applyRampAcceleration() {
-  if(currentSpeed_L < targetSpeed_L)
-    currentSpeed_L = min(currentSpeed_L + RAMP_RATE, targetSpeed_L);
-  else if(currentSpeed_L > targetSpeed_L)
-    currentSpeed_L = max(currentSpeed_L - RAMP_RATE, targetSpeed_L);
-
-  if(currentSpeed_R < targetSpeed_R)
-    currentSpeed_R = min(currentSpeed_R + RAMP_RATE, targetSpeed_R);
-  else if(currentSpeed_R > targetSpeed_R)
-    currentSpeed_R = max(currentSpeed_R - RAMP_RATE, targetSpeed_R);
+void resetPID() {
+  integral_F = integral_R = 0;
+  prev_error_F = prev_error_R = 0;
 }
 
 void stopMotors() {
-  targetSpeed_L = 0;  targetSpeed_R = 0;
-  currentSpeed_L = 0; currentSpeed_R = 0;
-  analogWrite(L_LPWM, 0); analogWrite(L_RPWM, 0);
-  analogWrite(R_LPWM, 0); analogWrite(R_RPWM, 0);
-  integral_F   = 0;  integral_R   = 0;
-  prev_error_F = 0;  prev_error_R = 0;
+  targetSpeed_L = targetSpeed_R = 0;
+  currentSpeed_L = currentSpeed_R = 0;
+  analogWrite(L_LPWM,0); analogWrite(L_RPWM,0);
+  analogWrite(R_LPWM,0); analogWrite(R_RPWM,0);
+  resetPID();
 }
 
 // ============================================
 // DEBUG
-// ============================================
 void debugPrint() {
   static unsigned long last = 0;
-  if(millis() - last < 100) return;
+  if(millis() - last < 120) return;
   last = millis();
 
+  Serial.print(currentState == FORWARD ? ">>> TIEN " : 
+               currentState == BACKWARD ? ">>> LUI " : 
+               currentState == AT_STATION ? ">>> TRAM " : ">>> DUNG ");
+
+  if(exitingStation) Serial.print("[EXITING] ");
+
   if(currentState == FORWARD) {
-    Serial.print(">>> TIEN <<<");
-    if(exitingStation) Serial.print(" [ROI TRAM]");
-    Serial.print(" | POS:"); Serial.print(posRear);
-    Serial.print(" | L:");   Serial.print(currentSpeed_L);
-    Serial.print(" R:");     Serial.print(currentSpeed_R);
-    Serial.print(" | R: [");
-    for(int i = 0; i < 8; i++) {
-      if(i == 0 || i == 7) Serial.print("*");
-      else Serial.print(valR[i]);
-      if(i < 7) Serial.print(" ");
-    }
-    Serial.println("]");
+    Serial.print("POS_R:"); Serial.print(posRear);
+  } else if(currentState == BACKWARD) {
+    Serial.print("POS_F:"); Serial.print(posFront);
   }
-  else if(currentState == BACKWARD) {
-    Serial.print(">>> LUI <<<");
-    if(exitingStation) Serial.print(" [ROI TRAM]");
-    Serial.print(" | POS:"); Serial.print(posFront);
-    Serial.print(" | L:");   Serial.print(currentSpeed_L);
-    Serial.print(" R:");     Serial.print(currentSpeed_R);
-    Serial.print(" | F: [");
-    for(int i = 0; i < 8; i++) {
-      if(i == 0 || i == 7) Serial.print("*");
-      else Serial.print(valF[i]);
-      if(i < 7) Serial.print(" ");
-    }
-    Serial.println("]");
+
+  Serial.print(" | L:"); Serial.print(currentSpeed_L);
+  Serial.print(" R:");   Serial.print(currentSpeed_R);
+  
+  // BUTTON DEBUG
+  Serial.print(" | BTN_F:"); Serial.print(digitalRead(BTN_FORWARD));
+  Serial.print(" BTN_B:"); Serial.print(digitalRead(BTN_BACKWARD));
+  
+  // SENSOR DEBUG - FILTERED
+  Serial.print(" | SF[");
+  for(int i = 0; i < 8; i++) {
+    Serial.print(i); Serial.print(":");Serial.print(filteredF[i]);
+    if(i<7) Serial.print(" ");
   }
-  else if(currentState == AT_STATION) {
-    Serial.print(">>> TAI TRAM <<<");
-    Serial.print(" | F: [");
-    for(int i = 0; i < 8; i++) {
-      if(i == 0 || i == 7) Serial.print("*");
-      else Serial.print(valF[i]);
-      if(i < 7) Serial.print(" ");
-    }
-    Serial.print("] R: [");
-    for(int i = 0; i < 8; i++) {
-      if(i == 0 || i == 7) Serial.print("*");
-      else Serial.print(valR[i]);
-      if(i < 7) Serial.print(" ");
-    }
-    Serial.println("]");
+  Serial.print("] SR[");
+  for(int i = 0; i < 8; i++) {
+    Serial.print(i); Serial.print(":");Serial.print(filteredR[i]);
+    if(i<7) Serial.print(" ");
   }
-  else {
-    Serial.print(">>> DUNG <<<");
-    Serial.print(" | F: [");
-    for(int i = 0; i < 8; i++) {
-      if(i == 0 || i == 7) Serial.print("*");
-      else Serial.print(valF[i]);
-      if(i < 7) Serial.print(" ");
-    }
-    Serial.print("] R: [");
-    for(int i = 0; i < 8; i++) {
-      if(i == 0 || i == 7) Serial.print("*");
-      else Serial.print(valR[i]);
-      if(i < 7) Serial.print(" ");
-    }
-    Serial.println("]");
+  Serial.print("]");
+  
+  // SENSOR DEBUG - RAW
+  Serial.print(" | RAW_SF[");
+  for(int i = 0; i < 8; i++) {
+    Serial.print(i); Serial.print(":");Serial.print(valF[i]);
+    if(i<7) Serial.print(" ");
   }
+  Serial.print("] RAW_SR[");
+  for(int i = 0; i < 8; i++) {
+    Serial.print(i); Serial.print(":");Serial.print(valR[i]);
+    if(i<7) Serial.print(" ");
+  }
+  Serial.print("]");
+  
+  Serial.println();
 }
+
